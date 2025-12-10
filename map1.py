@@ -14,7 +14,7 @@ CRITICAL_STEPS = {
     '4282': 'TIM-Adhesive Dispensing', '4285': 'LID ATTACH', 
     '4276': 'STIFFENER DISPENSE', '4277': 'STIFFENER ATTACH',
     '4271': 'AOI (TOP Inspection)', 
-    '4255': 'AOI (Bottom inspection)', # <--- NEW STEP ADDED
+    '4255': 'AOI (Bottom inspection)', 
     '4269': 'PGA/LGA CHIP CAP REWORK (Top)',
     '4221': 'AOI RERUN', '4294': 'MPU AUTO FLIP',
     '4404': 'BGA BALL ATTACH', '4414': 'BGA OS', '4415': 'BGA ICOS',
@@ -249,16 +249,20 @@ def generate_traceability_matrix(df, affected_lots_base):
             if not mode.empty:
                 common_tools[specname] = mode.iloc[0]
 
-    return traceability, common_tools
+    # NEW: Get all unique machines for ALL critical steps used by the affected lots
+    all_trace_machines = df_filtered.groupby(['SPECNAME', 'EQUIPMENT_LINE_NAME']).size().reset_index(name='count')
+    all_trace_machines['Step_Machine'] = all_trace_machines['SPECNAME'].map(CRITICAL_STEPS) + " (" + all_trace_machines['SPECNAME'] + ") - Tool: " + all_trace_machines['EQUIPMENT_LINE_NAME']
+    
+    return traceability, common_tools, all_trace_machines
 
-# --- Timeline Data Generation (UPDATED to include TRACK_IN_TS) ---
+# --- Timeline Data Generation (UPDATED to use Trackout Quantity) ---
 @st.cache_data(show_spinner=False)
-def generate_timeline_data(df, affected_lots_base, step_id, common_machine, affected_quantity_map, window=5): 
+def generate_timeline_data(df, affected_lots_base, step_id, selected_machine, affected_quantity_map, window=5): 
     df['SPECNAME'] = df['SPECNAME'].astype(str) 
     df['ASSEMBLY_LOT'] = df['ASSEMBLY_LOT'].astype(str)
     
     df_timeline = df[
-        (df['EQUIPMENT_LINE_NAME'] == common_machine) & 
+        (df['EQUIPMENT_LINE_NAME'] == selected_machine) & 
         (df['SPECNAME'] == step_id)
     ].sort_values('TRACK_OUT_TS').reset_index(drop=True)
 
@@ -276,22 +280,26 @@ def generate_timeline_data(df, affected_lots_base, step_id, common_machine, affe
     end_index = min(len(df_timeline), max(affected_indices) + window + 1)
 
     timeline_window = df_timeline.iloc[start_index:end_index].copy()
-    timeline_window['SEQUENCE_INDEX'] = timeline_window.index 
+    timeline_window['SEQUENCE_INDEX'] = timeline_window.index # Keep for charting X-axis
     
+    # Use the cleaned 'Trackout Quantity' column
+    if 'Trackout Quantity' not in timeline_window.columns:
+         timeline_window['Trackout Quantity'] = 1 # Fallback, though loaded data should have it
+
     timeline_window['AFFECTED_QTY'] = timeline_window['ASSEMBLY_LOT'].map(affected_quantity_map).fillna(0).astype(int)
 
-    # UPDATED: Added 'TRACK_IN_TS' to the selected columns
+    # UPDATED: Select 'Trackout Quantity' from the loaded data for Table 4 display
     timeline_window = timeline_window[[
-        'ASSEMBLY_LOT', 'SEQUENCE_INDEX', 'TRACK_IN_TS', 
-        'TRACK_OUT_TS', 'OPERATOR', 'EQUIPMENT_LINE_NAME', 
-        'SPECNAME', 'AFFECTED_QTY'
+        'ASSEMBLY_LOT', 'SEQUENCE_INDEX', 'Trackout Quantity', # Added Trackout Quantity
+        'TRACK_IN_TS', 'TRACK_OUT_TS', 'OPERATOR', 
+        'EQUIPMENT_LINE_NAME', 'SPECNAME', 'AFFECTED_QTY'
     ]].copy()
     
     # Renaming the columns
     timeline_window.columns = [
-        'Lot ID', 'Sequence Index', 'Track In Timestamp', 
-        'Track Out Timestamp', 'Operator', 'Machine ID', 
-        'Step ID', 'Affected Quantity'
+        'Lot ID', 'Sequence Index', 'Trackout Lot Quantity', # New column name
+        'Track In Timestamp', 'Track Out Timestamp', 'Operator', 
+        'Machine ID', 'Step ID', 'Affected Quantity'
     ]
     timeline_window['Affected'] = timeline_window['Affected Quantity'] > 0
     
@@ -388,16 +396,18 @@ def style_timeline_table(df_window):
     def highlight_affected_full_row(s):
         is_affected = s['Affected Quantity'] > 0 
         style = 'font-weight: bold; background-color: #fce5cd;' if is_affected else ''
-        # UPDATED: Added 'Track In Timestamp' to cols_to_style
-        cols_to_style = ['Lot ID', 'Track In Timestamp', 'Track Out Timestamp', 'Operator', 'Affected Quantity']
+        # Cols to style: Lot ID, Timestamps, Operator, Quantities
+        cols_to_style = ['Lot ID', 'Track In Timestamp', 'Track Out Timestamp', 'Operator', 'Affected Quantity', 'Trackout Lot Quantity']
         styles = [style if col in cols_to_style else '' for col in s.index]
         return styles
 
     # Format both timestamps to show full detail for sequencing
     styled_df = df_window.style.apply(highlight_affected_full_row, axis=1).format(
         {
-            'Track In Timestamp': lambda t: t.strftime('%Y-%m-%d %H:%M:%S'), # NEW FORMATTING
-            'Track Out Timestamp': lambda t: t.strftime('%Y-%m-%d %H:%M:%S')
+            'Track In Timestamp': lambda t: t.strftime('%Y-%m-%d %H:%M:%S'), 
+            'Track Out Timestamp': lambda t: t.strftime('%Y-%m-%d %H:%M:%S'),
+            'Affected Quantity': '{:,.0f}',
+            'Trackout Lot Quantity': '{:,.0f}',
         }
     )
     
@@ -546,7 +556,7 @@ def render_traceability_page(df_filtered, all_affected_lots_base):
         return
 
     with st.spinner("Generating Traceability Matrix..."):
-        traceability_df, common_tools = generate_traceability_matrix(df_filtered, all_affected_lots_base)
+        traceability_df, common_tools, all_trace_machines = generate_traceability_matrix(df_filtered, all_affected_lots_base)
 
     st.subheader("Table 1: Tool Traceability Matrix")
     st.markdown("The most common tool for a critical step across all affected lots is highlighted in **green**, indicating a potential suspect machine.")
@@ -557,10 +567,10 @@ def render_traceability_page(df_filtered, all_affected_lots_base):
     else:
         st.warning("No traceability data found for the input lots in the critical steps within the current product filter.")
     
-    return traceability_df, common_tools
+    return traceability_df, common_tools, all_trace_machines
 
 
-def render_timeline_page(df_filtered, affected_lots_base, affected_quantity_map, traceability_df, common_tools):
+def render_timeline_page(df_filtered, affected_lots_base, affected_quantity_map, traceability_df, common_tools, all_trace_machines):
     st.header("3. ⏱️ Time-Series Proximity (Timeline) Analysis")
     st.divider()
     
@@ -572,22 +582,50 @@ def render_timeline_page(df_filtered, affected_lots_base, affected_quantity_map,
         st.warning("Timeline analysis requires traceability data. Please check the 'Traceability & Commonality Analysis' section above.")
         return
     
+    # NEW: Prepare options to include ALL step/machine combinations found
     timeline_options = {}
-    for step_id, machine_id in common_tools.items():
-        step_name = CRITICAL_STEPS.get(step_id, f"Unknown Step {step_id}")
-        option_label = f"{step_name} ({step_id}) - Tool: {machine_id}"
+    for index, row in all_trace_machines.iterrows():
+        option_label = row['Step_Machine']
+        step_id = row['SPECNAME']
+        machine_id = row['EQUIPMENT_LINE_NAME']
         timeline_options[option_label] = (step_id, machine_id)
-    
-    if timeline_options:
         
+    if common_tools:
+        # Sort options: put the common tool options first
+        sorted_labels = []
+        for step_id in common_tools.keys():
+            step_name = CRITICAL_STEPS.get(step_id, f"Unknown Step {step_id}")
+            machine_id = common_tools[step_id]
+            common_label = f"{step_name} ({step_id}) - Tool: {machine_id}"
+            if common_label in timeline_options:
+                sorted_labels.append(common_label + " (COMMON)") # Highlight common machine
+                del timeline_options[common_label]
+
+        # Add remaining unique options
+        sorted_labels.extend(sorted(timeline_options.keys()))
+        
+        # Re-map keys after adding '(COMMON)' suffix
+        final_timeline_options = {}
+        first_option = None
+        for label in sorted_labels:
+            original_label = label.replace(" (COMMON)", "")
+            # Find the step_id and machine_id from the original data structure
+            step_id = original_label.split(" (")[1].split(")")[0]
+            machine_id = original_label.split(" - Tool: ")[1]
+            final_timeline_options[label] = (step_id, machine_id)
+            if first_option is None:
+                first_option = label
+
+
         with st.container():
             selected_label = st.selectbox(
-                "Select Process Step and Common Tool to Analyze:",
-                options=list(timeline_options.keys()),
+                "Select Process Step and Tool to Analyze:",
+                options=list(final_timeline_options.keys()),
+                index=sorted_labels.index(first_option) if first_option else 0,
                 key='timeline_select_key'
             )
         
-        selected_step, selected_machine = timeline_options[selected_label]
+        selected_step, selected_machine = final_timeline_options[selected_label]
         
         st.info(f"Focused Analysis on Tool: **{selected_machine}** (Sequence: 5 lots before/after first/last affected lot).")
 
@@ -620,7 +658,7 @@ def render_timeline_page(df_filtered, affected_lots_base, affected_quantity_map,
 
             st.altair_chart(timeline_chart, use_container_width=True) 
 
-            # --- Table 4: Detailed Timeline Table (Updated to show Track In) ---
+            # --- Table 4: Detailed Timeline Table (Updated to show Track Out Lot Quantity) ---
             st.subheader("Table 4: Detailed Timeline Lot Sequence")
             st.markdown("Affected lots are highlighted in **orange/bold**. Sequence is indicated by the precise **Track Out Timestamp**.")
             
@@ -631,7 +669,7 @@ def render_timeline_page(df_filtered, affected_lots_base, affected_quantity_map,
         else:
             st.warning(f"Could not generate timeline for the selected tool **{selected_machine}**.")
     else:
-        st.warning("No common machines found across the critical process steps for the affected lots to perform a timeline analysis.")
+        st.warning("No tool data found across the critical process steps for the affected lots to perform a timeline analysis.")
 
 # --- UCT Re-factored Rendering Functions ---
 
@@ -817,11 +855,11 @@ def render_combined_analysis_page(df_filtered, all_affected_lots_base, selected_
     st.markdown("---")
     
     # 2. Traceability Analysis
-    traceability_df, common_tools = render_traceability_page(df_filtered, all_affected_lots_base)
+    traceability_df, common_tools, all_trace_machines = render_traceability_page(df_filtered, all_affected_lots_base)
     st.markdown("---")
     
     # 3. Timeline Analysis
-    render_timeline_page(df_filtered, selected_lots, affected_quantity_map, traceability_df, common_tools)
+    render_timeline_page(df_filtered, selected_lots, affected_quantity_map, traceability_df, common_tools, all_trace_machines)
     st.markdown("---")
     
     # 4. Cycle Time Analysis (Now UCT)
