@@ -51,7 +51,7 @@ def load_data(uploaded_file):
             file_string = StringIO(uploaded_file.getvalue().decode("utf-8"))
             df = pd.read_csv(file_string, usecols=required_cols)
         elif file_name.endswith('.xlsx') or uploaded_file.type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-            # NOTE: openpyxl must be installed for XLSX support
+            # openpyxl must be installed for XLSX support
             df = pd.read_excel(uploaded_file, sheet_name=0, usecols=required_cols)
         else:
             st.error("Unsupported file type. Please upload a CSV or XLSX file.")
@@ -235,7 +235,7 @@ def generate_traceability_matrix(df, affected_lots_base):
 
     return traceability, common_tools
 
-# --- Timeline Data Generation ---
+# --- Timeline Data Generation (UPDATED to include TRACK_IN_TS) ---
 @st.cache_data(show_spinner=False)
 def generate_timeline_data(df, affected_lots_base, step_id, common_machine, affected_quantity_map, window=5): 
     df['SPECNAME'] = df['SPECNAME'].astype(str) 
@@ -264,8 +264,19 @@ def generate_timeline_data(df, affected_lots_base, step_id, common_machine, affe
     
     timeline_window['AFFECTED_QTY'] = timeline_window['ASSEMBLY_LOT'].map(affected_quantity_map).fillna(0).astype(int)
 
-    timeline_window = timeline_window[['ASSEMBLY_LOT', 'SEQUENCE_INDEX', 'TRACK_OUT_TS', 'OPERATOR', 'EQUIPMENT_LINE_NAME', 'SPECNAME', 'AFFECTED_QTY']].copy()
-    timeline_window.columns = ['Lot ID', 'Sequence Index', 'Track Out Timestamp', 'Operator', 'Machine ID', 'Step ID', 'Affected Quantity']
+    # UPDATED: Added 'TRACK_IN_TS' to the selected columns
+    timeline_window = timeline_window[[
+        'ASSEMBLY_LOT', 'SEQUENCE_INDEX', 'TRACK_IN_TS', 
+        'TRACK_OUT_TS', 'OPERATOR', 'EQUIPMENT_LINE_NAME', 
+        'SPECNAME', 'AFFECTED_QTY'
+    ]].copy()
+    
+    # Renaming the columns
+    timeline_window.columns = [
+        'Lot ID', 'Sequence Index', 'Track In Timestamp', 
+        'Track Out Timestamp', 'Operator', 'Machine ID', 
+        'Step ID', 'Affected Quantity'
+    ]
     timeline_window['Affected'] = timeline_window['Affected Quantity'] > 0
     
     return timeline_window, affected_lots_base
@@ -295,6 +306,43 @@ def generate_cycle_time_comparison_table(df_ct, df_affected_ct, selected_lots):
 
     return comparison_df
 
+# --- NEW: Lot-Level UCT Comparison Function ---
+def generate_lot_uct_comparison(df_ct, df_affected_ct, baseline_comparison_df):
+    """
+    Compares the UCT of individual affected lots against the process step baseline UCT.
+    """
+    if baseline_comparison_df.empty:
+        return pd.DataFrame()
+
+    # 1. Get Baseline Averages (from the aggregated comparison table)
+    baseline_map = baseline_comparison_df.set_index('Process Step Name')['Baseline Avg UCT (min/unit)'].to_dict()
+    
+    # Filter the affected lot data to the relevant steps
+    df_lot_uct = df_affected_ct.copy()
+    
+    # 2. Group affected lots by Lot ID and Step to get the Lot's Avg UCT
+    lot_avg_uct = df_lot_uct.groupby(['ASSEMBLY_LOT', 'Process Step Name'])['Unit Cycle Time (min/unit)'].mean().reset_index()
+    lot_avg_uct.rename(columns={'Unit Cycle Time (min/unit)': 'Lot Avg UCT (min/unit)'}, inplace=True)
+    
+    # 3. Merge with Baseline Average using Process Step Name
+    lot_avg_uct['Baseline Avg UCT (min/unit)'] = lot_avg_uct['Process Step Name'].map(baseline_map)
+    
+    # 4. Calculate Difference
+    lot_avg_uct['UCT Difference (min/unit)'] = lot_avg_uct['Lot Avg UCT (min/unit)'] - lot_avg_uct['Baseline Avg UCT (min/unit)']
+    lot_avg_uct['UCT Difference (%)'] = (lot_avg_uct['UCT Difference (min/unit)'] / lot_avg_uct['Baseline Avg UCT (min/unit)']) * 100
+
+    # Pivot the table so steps are columns (easier to read)
+    lot_comparison_pivot = lot_avg_uct.pivot_table(
+        index='ASSEMBLY_LOT', 
+        columns='Process Step Name', 
+        values='UCT Difference (%)'
+    ).reset_index()
+    
+    lot_comparison_pivot.rename(columns={'ASSEMBLY_LOT': 'Full Lot ID'}, inplace=True)
+    
+    return lot_comparison_pivot
+
+
 # --- Styling Functions ---
 def style_staging_table(df_staging):
     def highlight_violation_row(row):
@@ -320,18 +368,22 @@ def style_traceability_table(df, common_tools):
 
 def style_timeline_table(df_window):
     """
-    Styles the timeline table, hides Sequence Index, and ensures full Track Out Timestamp is visible.
+    Styles the timeline table, hides Sequence Index, and ensures full Track Out/In Timestamp is visible.
     """
     def highlight_affected_full_row(s):
         is_affected = s['Affected Quantity'] > 0 
         style = 'font-weight: bold; background-color: #fce5cd;' if is_affected else ''
-        cols_to_style = ['Lot ID', 'Track Out Timestamp', 'Operator', 'Affected Quantity']
+        # UPDATED: Added 'Track In Timestamp' to cols_to_style
+        cols_to_style = ['Lot ID', 'Track In Timestamp', 'Track Out Timestamp', 'Operator', 'Affected Quantity']
         styles = [style if col in cols_to_style else '' for col in s.index]
         return styles
 
-    # Format the Track Out Timestamp to show full detail for sequencing
+    # Format both timestamps to show full detail for sequencing
     styled_df = df_window.style.apply(highlight_affected_full_row, axis=1).format(
-        {'Track Out Timestamp': lambda t: t.strftime('%Y-%m-%d %H:%M:%S')}
+        {
+            'Track In Timestamp': lambda t: t.strftime('%Y-%m-%d %H:%M:%S'), # NEW FORMATTING
+            'Track Out Timestamp': lambda t: t.strftime('%Y-%m-%d %H:%M:%S')
+        }
     )
     
     # Columns to hide: Sequence Index, Affected flag, Machine ID, Step ID
@@ -348,6 +400,16 @@ def style_comparison_table(df, selected_lots):
         'UCT Difference (%)': '{:+.1f}%'
     }).apply(lambda x: ['background-color: #fce5cd; font-weight: bold;' if v > 0 else '' for v in x], 
              subset=['UCT Difference (%)'], axis=0)
+
+# --- NEW Styling Function for the Pivot Table ---
+def style_lot_comparison_table(df):
+    def highlight_positive_difference(series):
+        is_positive = series > 0
+        return ['background-color: #fce5cd; font-weight: bold;' if v else '' for v in is_positive]
+
+    # Format the entire table, excluding the first column ('Full Lot ID')
+    return df.style.format('{:+.1f}%', subset=df.columns[1:]).apply(highlight_positive_difference, axis=0, subset=df.columns[1:])
+
 
 # ======================================================================
 # STREAMLIT PAGES
@@ -541,7 +603,7 @@ def render_timeline_page(df_filtered, affected_lots_base, affected_quantity_map,
 
             st.altair_chart(timeline_chart, use_container_width=True) 
 
-            # --- Table 4: Detailed Timeline Table (Updated to show TS instead of Index) ---
+            # --- Table 4: Detailed Timeline Table (Updated to show Track In) ---
             st.subheader("Table 4: Detailed Timeline Lot Sequence")
             st.markdown("Affected lots are highlighted in **orange/bold**. Sequence is indicated by the precise **Track Out Timestamp**.")
             
@@ -569,10 +631,17 @@ def render_cycle_time_page(df_filtered, affected_lots_base, selected_edv):
         df_ct_filtered = df_ct[df_ct['SPECNAME'].isin(ct_steps_for_analysis.keys())].copy()
         
         comparison_df = pd.DataFrame() 
+        lot_comparison_pivot = pd.DataFrame() # Initialize the new DataFrame
+        
         if not df_ct_filtered.empty:
             df_ct_filtered['Process Step Name'] = df_ct_filtered['SPECNAME'].map(CRITICAL_STEPS).fillna(df_ct_filtered['SPECNAME'])
             df_affected_ct = df_ct_filtered[df_ct_filtered['ASSEMBLY_LOT'].isin(affected_lots_base)].copy()
+            
+            # Table 6 (Aggregate Comparison)
             comparison_df = generate_cycle_time_comparison_table(df_ct_filtered, df_affected_ct, affected_lots_base)
+            
+            # NEW! Table 7 (Lot-level Comparison)
+            lot_comparison_pivot = generate_lot_uct_comparison(df_ct_filtered, df_affected_ct, comparison_df)
 
     # --- Figure 3: Box Plot (UCT) ---
     st.subheader("Figure 3: Process Unit Cycle Time (UCT) Baseline Distribution (Box Plot)")
@@ -603,13 +672,24 @@ def render_cycle_time_page(df_filtered, affected_lots_base, selected_edv):
     st.markdown("---")
 
     # --- Table 6: Comparison Table (UCT) ---
-    st.subheader(f"Table 6: Unit Cycle Time (UCT) Comparison (Affected Lots vs. Baseline)")
+    st.subheader(f"Table 6: Unit Cycle Time (UCT) Comparison (Affected Lots Avg vs. Baseline Avg)")
     
     if not comparison_df.empty:
         st.markdown(f"Compares Avg **UCT (min/unit)** of the **{len(affected_lots_base)}** selected lots against the overall baseline. **Positive differences (orange)** mean the affected group was slower.")
         st.dataframe(style_comparison_table(comparison_df, affected_lots_base), use_container_width=True)
     else:
         st.warning("Unit Cycle Time comparison analysis skipped: No valid comparison data found.")
+
+    # --- NEW! Table 7: Lot-Level UCT Comparison ---
+    st.markdown("---")
+    st.subheader("Table 7: Individual Lot UCT Performance vs. Baseline")
+    
+    if not lot_comparison_pivot.empty:
+        st.markdown(r"Shows the **percentage difference** in UCT for each selected lot compared to the process step's baseline average. **Positive values (orange)** indicate the specific lot ran slower than the baseline average.")
+        with st.container(height=300):
+            st.dataframe(style_lot_comparison_table(lot_comparison_pivot), use_container_width=True)
+    else:
+        st.info("Individual lot UCT comparison skipped: Insufficient data to compare individual lots against the baseline.")
     
     return comparison_df
 
@@ -641,7 +721,7 @@ def render_combined_analysis_page(df_filtered, all_affected_lots_base, selected_
 def main():
     st.set_page_config(
         layout="wide", 
-        page_title="Process & Machine Mapping Analyst (v1.3 - Final)",
+        page_title="Process & Machine Mapping Analyst (v1.4 - Final)",
         initial_sidebar_state="expanded" 
     )
     
@@ -762,7 +842,7 @@ def main():
 
         # 4. LOT SUB-FILTER (Used for comparison/timeline)
         st.sidebar.markdown("---")
-        st.sidebar.subheader("4. Lot Sub-Filter (For Tables 4 & 6)")
+        st.sidebar.subheader("4. Lot Sub-Filter (For Tables 4, 6 & 7)")
         
         lots_in_filtered_data = df_filtered['ASSEMBLY_LOT'].unique().tolist()
         available_lots_for_select = sorted(list(set(st.session_state.all_affected_lots_base) & set(lots_in_filtered_data)))
@@ -812,7 +892,7 @@ def main():
             )
             
     else:
-        st.title("Welcome to the Process Analysis Tool (v1.3 - Final)")
+        st.title("Welcome to the Process Analysis Tool (v1.4 - Final)")
         st.info("Please upload your manufacturing data file (.csv or .xlsx) using the control panel on the left to start the analysis.")
 
 
