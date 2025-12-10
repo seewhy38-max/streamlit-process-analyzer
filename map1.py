@@ -282,17 +282,17 @@ def generate_timeline_data(df, affected_lots_base, step_id, common_machine, affe
     return timeline_window, affected_lots_base
 
 # --- Cycle Time Comparison Generation (Uses UCT) ---
-def generate_cycle_time_comparison_table(df_ct, df_affected_ct, selected_lots):
+def generate_cycle_time_comparison_table(df_ct_base, df_ct_affected, selected_lots):
     
     # Calculate Baseline Avg UCT
-    baseline_ct = df_ct.groupby('Process Step Name')['Unit Cycle Time (min/unit)'].mean().reset_index()
+    baseline_ct = df_ct_base.groupby('Process Step Name')['Unit Cycle Time (min/unit)'].mean().reset_index()
     baseline_ct.rename(columns={'Unit Cycle Time (min/unit)': 'Baseline Avg UCT (min/unit)'}, inplace=True)
     
     # Calculate Affected Lot Avg UCT
-    affected_ct = df_affected_ct.groupby('Process Step Name')['Unit Cycle Time (min/unit)'].mean().reset_index()
+    affected_ct = df_ct_affected.groupby('Process Step Name')['Unit Cycle Time (min/unit)'].mean().reset_index()
     affected_ct.rename(columns={'Unit Cycle Time (min/unit)': 'Affected Lot Avg UCT (min/unit)'}, inplace=True)
 
-    affected_count = df_affected_ct.groupby('Process Step Name')['ASSEMBLY_LOT'].nunique().reset_index()
+    affected_count = df_ct_affected.groupby('Process Step Name')['ASSEMBLY_LOT'].nunique().reset_index()
     affected_count.rename(columns={'ASSEMBLY_LOT': 'Affected Lot Count'}, inplace=True)
 
     comparison_df = pd.merge(baseline_ct, affected_ct, on='Process Step Name', how='inner')
@@ -306,10 +306,10 @@ def generate_cycle_time_comparison_table(df_ct, df_affected_ct, selected_lots):
 
     return comparison_df
 
-# --- NEW: Lot-Level UCT Comparison Function ---
-def generate_lot_uct_comparison(df_ct, df_affected_ct, baseline_comparison_df):
+# --- Lot-Level UCT Comparison Function ---
+def generate_lot_uct_comparison(df_ct_base, df_ct_affected, baseline_comparison_df):
     """
-    Compares the UCT of individual affected lots against the process step baseline UCT.
+    Compares the UCT of individual affected lots against the product-specific process step baseline UCT.
     """
     if baseline_comparison_df.empty:
         return pd.DataFrame()
@@ -318,7 +318,7 @@ def generate_lot_uct_comparison(df_ct, df_affected_ct, baseline_comparison_df):
     baseline_map = baseline_comparison_df.set_index('Process Step Name')['Baseline Avg UCT (min/unit)'].to_dict()
     
     # Filter the affected lot data to the relevant steps
-    df_lot_uct = df_affected_ct.copy()
+    df_lot_uct = df_ct_affected.copy()
     
     # 2. Group affected lots by Lot ID and Step to get the Lot's Avg UCT
     lot_avg_uct = df_lot_uct.groupby(['ASSEMBLY_LOT', 'Process Step Name'])['Unit Cycle Time (min/unit)'].mean().reset_index()
@@ -342,6 +342,8 @@ def generate_lot_uct_comparison(df_ct, df_affected_ct, baseline_comparison_df):
     
     return lot_comparison_pivot
 
+# --- NEW: Pareto Calculation Function (REMOVED as per user request) ---
+# --- KEEPING THE STYLING FUNCTIONS ---
 
 # --- Styling Functions ---
 def style_staging_table(df_staging):
@@ -401,14 +403,15 @@ def style_comparison_table(df, selected_lots):
     }).apply(lambda x: ['background-color: #fce5cd; font-weight: bold;' if v > 0 else '' for v in x], 
              subset=['UCT Difference (%)'], axis=0)
 
-# --- NEW Styling Function for the Pivot Table ---
+# --- Styling Function for the Pivot Table ---
 def style_lot_comparison_table(df):
     def highlight_positive_difference(series):
         is_positive = series > 0
         return ['background-color: #fce5cd; font-weight: bold;' if v else '' for v in is_positive]
 
-    # Format the entire table, excluding the first column ('Full Lot ID')
-    return df.style.format('{:+.1f}%', subset=df.columns[1:]).apply(highlight_positive_difference, axis=0, subset=df.columns[1:])
+    # Format the entire table, excluding the index columns ('Full Lot ID', 'Product Name (EDV)')
+    # Note: Index columns are excluded by default when applying `subset=df.columns`
+    return df.style.format('{:+.1f}%').apply(highlight_positive_difference, axis=0)
 
 
 # ======================================================================
@@ -616,85 +619,180 @@ def render_timeline_page(df_filtered, affected_lots_base, affected_quantity_map,
     else:
         st.warning("No common machines found across the critical process steps for the affected lots to perform a timeline analysis.")
 
+# --- UCT Re-factored Rendering Functions ---
 
-def render_cycle_time_page(df_filtered, affected_lots_base, selected_edv):
-    st.header("4. 📈 Unit Cycle Time (UCT) Variability Analysis")
-    st.divider()
+def render_uct_box_plot(df_edv_base, edv):
+    st.subheader(f"Figure 3: Process Unit Cycle Time (UCT) Baseline Distribution ({edv})")
+    
+    ct_steps_for_analysis = {k: v for k, v in CRITICAL_STEPS.items() if k not in ['4280', '4300']}
+    steps_with_data = df_edv_base['Process Step Name'].unique()
+    step_order = [CRITICAL_STEPS[k] for k in ct_steps_for_analysis.keys() if CRITICAL_STEPS[k] in steps_with_data]
+
+    st.markdown(f"Shows **UCT (min/unit)** distribution for **{edv}** lots across critical steps. **Y-axis is logarithmic**.")
+
+    X_ENCODING = alt.X('Process Step Name', axis=alt.Axis(labelAngle=-45, title='Process Step'), sort=step_order, type='nominal')
+    Y_ENCODING = alt.Y('Unit Cycle Time (min/unit)', title='Unit Cycle Time (Minutes/Unit) [Log Scale]', scale=alt.Scale(type="log", domainMin=0.001))
+
+    ct_chart = alt.Chart(df_edv_base).mark_boxplot(extent="min-max", size=25, opacity=0.8 ).encode(
+        x=X_ENCODING, y=Y_ENCODING, color=alt.value("darkblue"), 
+        tooltip=['Process Step Name', 'EQUIPMENT_LINE_NAME', alt.Tooltip('Unit Cycle Time (min/unit)', format='.3f', title='UCT (min/unit)')]
+    ).properties(
+        title=f"Process Unit Cycle Time Baseline Distribution for {edv}"
+    ).interactive()
+    
+    st.altair_chart(ct_chart, use_container_width=True) 
+
+def render_aggregate_uct_table(comparison_df, edv_lots):
+    st.subheader(f"Table 6: Unit Cycle Time (UCT) Comparison (Affected Lots Avg vs. Baseline Avg)")
+    if not comparison_df.empty:
+        st.markdown(f"Compares Avg **UCT (min/unit)** of the **{len(edv_lots)}** selected lots against the product-specific baseline. **Positive differences (orange)** mean the affected group was slower.")
+        st.dataframe(style_comparison_table(comparison_df, edv_lots), use_container_width=True)
+    else:
+        st.warning("Aggregate UCT comparison analysis skipped: No valid comparison data found.")
+
+def render_individual_uct_table(lot_comparison_pivot):
+    st.subheader("Table 7.1: Individual Lot UCT Performance vs. Baseline (Affected Lot)")
+    if not lot_comparison_pivot.empty:
+        st.markdown(r"Shows the **percentage difference** in UCT for each selected lot compared to the product-specific baseline average. **Positive values (orange)** indicate the specific lot ran slower than the baseline average.")
+        # Ensure 'Full Lot ID' is set as index before styling
+        styled_df = style_lot_comparison_table(lot_comparison_pivot.set_index('Full Lot ID'))
+        with st.container(height=300):
+            st.dataframe(styled_df, use_container_width=True)
+    else:
+        st.info("Individual lot UCT comparison skipped: Insufficient data to compare individual lots against the baseline.")
+
+
+# --- Orchestrator for UCT Analysis by Product ---
+def orchestrate_uct_analysis(df_filtered, selected_lots, affected_lots_edv_df):
+    
+    unique_edvs = affected_lots_edv_df['Product Name (EDV)'].unique()
+    
+    # Filter out 'NOT FOUND' EDVs to ensure valid comparisons
+    valid_edvs = sorted([edv for edv in unique_edvs if edv != 'NOT FOUND IN DATA'])
+
+    if not valid_edvs:
+        st.warning("UCT Analysis skipped: No affected lots found with a valid Product Name (EDV) in the filtered data.")
+        return pd.DataFrame()
+
+    final_lot_comparison_summary = []
+    
+    # Initialize the critical steps for filtering UCT data
+    ct_steps_for_analysis = {k: v for k, v in CRITICAL_STEPS.items() if k not in ['4280', '4300']}
+    
+    with st.spinner("Performing Product-Specific UCT Analysis..."):
+        
+        # 1. Calculate UCT for all filtered data once
+        df_ct = calculate_cycle_time(df_filtered)
+        df_ct_filtered = df_ct[df_ct['SPECNAME'].isin(ct_steps_for_analysis.keys())].copy()
+        
+        if df_ct_filtered.empty:
+            st.warning("UCT Analysis skipped: No valid production data found for the critical process steps.")
+            return pd.DataFrame()
+            
+        df_ct_filtered['Process Step Name'] = df_ct_filtered['SPECNAME'].map(CRITICAL_STEPS).fillna(df_ct_filtered['SPECNAME'])
+        
+        st.header("4. 📈 Unit Cycle Time (UCT) Variability Analysis")
+        st.divider()
+
+        # 2. Loop through each Product (EDV) for analysis
+        for i, edv in enumerate(valid_edvs):
+            st.subheader(f"📊 {i+1}. UCT Analysis for Product: **{edv}**")
+            
+            # --- Product-Specific Data Sub-setting ---
+            # Lots belonging to the current EDV that are also selected in the sub-filter
+            edv_lots = affected_lots_edv_df[
+                affected_lots_edv_df['Product Name (EDV)'] == edv
+            ].index.intersection(pd.Index(selected_lots)).tolist()
+            
+            if not edv_lots:
+                st.warning(f"No selected affected lots found for product {edv}. Skipping this section.")
+                continue
+
+            # Data containing only the current EDV (for baseline)
+            df_edv_base = df_ct_filtered[df_ct_filtered['EDV'] == edv].copy()
+            
+            # Affected data for this EDV
+            df_edv_affected = df_edv_base[df_edv_base['ASSEMBLY_LOT'].isin(edv_lots)].copy()
+            
+            if df_edv_base.empty or df_edv_affected.empty:
+                st.warning(f"Skipping analysis for {edv}: Insufficient baseline or affected data.")
+                continue
+
+            # --- RENDER/CALCULATE PER PRODUCT ---
+            
+            # a) Calculate Aggregate Comparison (Table 6)
+            comparison_df = generate_cycle_time_comparison_table(df_edv_base, df_edv_affected, edv_lots)
+            
+            # b) Calculate Individual Lot Comparison (Table 7 - for this product)
+            lot_comparison_pivot = generate_lot_uct_comparison(df_edv_base, df_edv_affected, comparison_df)
+            
+            # c) Render Figure 3 (Box Plot)
+            render_uct_box_plot(df_edv_base, edv)
+            
+            # d) Render Table 6 (Aggregate)
+            render_aggregate_uct_table(comparison_df, edv_lots)
+            
+            # e) Render Table 7.1 (Individual Lot - for this product)
+            render_individual_uct_table(lot_comparison_pivot)
+            
+            # 3. Compile Summary Data for Final Table
+            if not lot_comparison_pivot.empty:
+                # Add a column for product grouping before melting
+                lot_comparison_pivot['Product Name (EDV)'] = edv
+                
+                # Convert the wide pivot table to a long format for final compilation
+                lot_comparison_long = lot_comparison_pivot.melt(
+                    id_vars=['Full Lot ID', 'Product Name (EDV)'],
+                    var_name='Process Step Name',
+                    value_name='UCT Difference (%)'
+                ).dropna(subset=['UCT Difference (%)'])
+                
+                final_lot_comparison_summary.append(lot_comparison_long)
+
+            st.markdown("---") 
+
+    # 4. Final Compilation and Summary Table (Table 7)
+    if final_lot_comparison_summary:
+        summary_df = pd.concat(final_lot_comparison_summary, ignore_index=True)
+        return summary_df.pivot_table(
+            index=['Full Lot ID', 'Product Name (EDV)'], 
+            columns='Process Step Name', 
+            values='UCT Difference (%)'
+        ).reset_index()
+    else:
+        return pd.DataFrame()
+
+
+def render_cycle_time_page(df_filtered, selected_lots, affected_lots_edv_df):
     
     if df_filtered is None:
         st.error("Data filtering incomplete.")
         return
 
-    with st.spinner("Calculating Unit Cycle Time Metrics..."):
-        df_ct = calculate_cycle_time(df_filtered)
-        ct_steps_for_analysis = {k: v for k, v in CRITICAL_STEPS.items() if k not in ['4280', '4300']}
-        df_ct_filtered = df_ct[df_ct['SPECNAME'].isin(ct_steps_for_analysis.keys())].copy()
+    # --- Orchestrate Product-Specific Analysis and Compile Summary ---
+    summary_pivot_df = orchestrate_uct_analysis(df_filtered, selected_lots, affected_lots_edv_df)
+
+    # --- Render Final Summary Table (Consolidated Table 7) ---
+    st.markdown("<hr style='border: 1px solid #ccc;'>", unsafe_allow_html=True)
+    st.subheader("Final Summary: Consolidated Individual Lot UCT Performance")
+    st.markdown("### Table 7: Consolidated Individual Lot UCT Performance vs. Product Baseline")
+    
+    if not summary_pivot_df.empty:
+        st.markdown(r"This table consolidates the **percentage difference** in UCT for all selected lots across **all analyzed products**. **Positive values (orange)** indicate slower performance than the respective product's baseline.")
+        # Set index for styling
+        summary_pivot_df = summary_pivot_df.set_index(['Full Lot ID', 'Product Name (EDV)']).copy()
         
-        comparison_df = pd.DataFrame() 
-        lot_comparison_pivot = pd.DataFrame() # Initialize the new DataFrame
-        
-        if not df_ct_filtered.empty:
-            df_ct_filtered['Process Step Name'] = df_ct_filtered['SPECNAME'].map(CRITICAL_STEPS).fillna(df_ct_filtered['SPECNAME'])
-            df_affected_ct = df_ct_filtered[df_ct_filtered['ASSEMBLY_LOT'].isin(affected_lots_base)].copy()
-            
-            # Table 6 (Aggregate Comparison)
-            comparison_df = generate_cycle_time_comparison_table(df_ct_filtered, df_affected_ct, affected_lots_base)
-            
-            # NEW! Table 7 (Lot-level Comparison)
-            lot_comparison_pivot = generate_lot_uct_comparison(df_ct_filtered, df_affected_ct, comparison_df)
-
-    # --- Figure 3: Box Plot (UCT) ---
-    st.subheader("Figure 3: Process Unit Cycle Time (UCT) Baseline Distribution (Box Plot)")
-    
-    if not df_ct_filtered.empty:
-        steps_with_data = df_ct_filtered['Process Step Name'].unique()
-        step_order = [CRITICAL_STEPS[k] for k in ct_steps_for_analysis.keys() if CRITICAL_STEPS[k] in steps_with_data]
-
-        st.markdown(f"Shows **UCT (min/unit)** distribution for **{selected_edv}** lots across critical steps. **Y-axis is logarithmic**.")
-
-        X_ENCODING = alt.X('Process Step Name', axis=alt.Axis(labelAngle=-45, title='Process Step'), sort=step_order, type='nominal')
-        # Reference the new Unit Cycle Time column
-        Y_ENCODING = alt.Y('Unit Cycle Time (min/unit)', title='Unit Cycle Time (Minutes/Unit) [Log Scale]', scale=alt.Scale(type="log", domainMin=0.001))
-
-        ct_chart = alt.Chart(df_ct_filtered).mark_boxplot(extent="min-max", size=25, opacity=0.8 ).encode(
-            x=X_ENCODING, y=Y_ENCODING, color=alt.value("darkblue"), 
-            # Update tooltip to show UCT
-            tooltip=['Process Step Name', 'EQUIPMENT_LINE_NAME', alt.Tooltip('Unit Cycle Time (min/unit)', format='.3f', title='UCT (min/unit)')]
-        ).properties(
-            title=f"Process Unit Cycle Time Baseline Distribution for {selected_edv}"
-        ).interactive()
-        
-        st.altair_chart(ct_chart, use_container_width=True) 
-
+        with st.container(height=400):
+            # Pass the DataFrame columns starting from the steps (excluding the index)
+            st.dataframe(style_lot_comparison_table(summary_pivot_df), use_container_width=True)
     else:
-        st.warning("Cycle Time analysis skipped: No valid production data found for the critical process steps.")
+        st.info("Consolidated UCT summary table skipped: No valid product-specific UCT data was generated.")
 
-    st.markdown("---")
+    return 
 
-    # --- Table 6: Comparison Table (UCT) ---
-    st.subheader(f"Table 6: Unit Cycle Time (UCT) Comparison (Affected Lots Avg vs. Baseline Avg)")
-    
-    if not comparison_df.empty:
-        st.markdown(f"Compares Avg **UCT (min/unit)** of the **{len(affected_lots_base)}** selected lots against the overall baseline. **Positive differences (orange)** mean the affected group was slower.")
-        st.dataframe(style_comparison_table(comparison_df, affected_lots_base), use_container_width=True)
-    else:
-        st.warning("Unit Cycle Time comparison analysis skipped: No valid comparison data found.")
-
-    # --- NEW! Table 7: Lot-Level UCT Comparison ---
-    st.markdown("---")
-    st.subheader("Table 7: Individual Lot UCT Performance vs. Baseline")
-    
-    if not lot_comparison_pivot.empty:
-        st.markdown(r"Shows the **percentage difference** in UCT for each selected lot compared to the process step's baseline average. **Positive values (orange)** indicate the specific lot ran slower than the baseline average.")
-        with st.container(height=300):
-            st.dataframe(style_lot_comparison_table(lot_comparison_pivot), use_container_width=True)
-    else:
-        st.info("Individual lot UCT comparison skipped: Insufficient data to compare individual lots against the baseline.")
-    
-    return comparison_df
 
 # --- New Combined Analysis Page ---
-def render_combined_analysis_page(df_filtered, all_affected_lots_base, selected_lots, affected_quantity_map, selected_edv):
+def render_combined_analysis_page(df_filtered, all_affected_lots_base, selected_lots, affected_quantity_map, selected_edv, affected_lots_edv_df):
     st.title("Comprehensive Analysis Report")
     st.markdown("This page combines all the key analyses into one scrollable view.")
     st.markdown("---")
@@ -712,7 +810,7 @@ def render_combined_analysis_page(df_filtered, all_affected_lots_base, selected_
     st.markdown("---")
     
     # 4. Cycle Time Analysis (Now UCT)
-    render_cycle_time_page(df_filtered, selected_lots, selected_edv)
+    render_cycle_time_page(df_filtered, selected_lots, affected_lots_edv_df)
     
 # ======================================================================
 # MAIN APP EXECUTION AND NAVIGATION
@@ -721,7 +819,7 @@ def render_combined_analysis_page(df_filtered, all_affected_lots_base, selected_
 def main():
     st.set_page_config(
         layout="wide", 
-        page_title="Process & Machine Mapping Analyst (v1.4 - Final)",
+        page_title="Process & Machine Mapping Analyst (v1.5 - Multi-Product UCT)",
         initial_sidebar_state="expanded" 
     )
     
@@ -807,15 +905,8 @@ def main():
             edv_options.extend(all_edv_options)
         
         # AUTOMATIC FILTER LOGIC:
-        lot_edvs = affected_lots_edv_df.reset_index()['Product Name (EDV)'].unique().tolist()
-        
-        # Filter out the 'NOT FOUND' entry
-        lot_edvs = [edv for edv in lot_edvs if edv != 'NOT FOUND IN DATA']
-        
-        if len(lot_edvs) == 1:
-            default_edv_selection = lot_edvs[0]
-        else:
-            default_edv_selection = 'All Products (Clear Filter)'
+        # Default the filter to 'All Products' regardless of lot EDVs to allow multi-product analysis
+        default_edv_selection = 'All Products (Clear Filter)'
 
         try:
             default_index = edv_options.index(default_edv_selection)
@@ -830,7 +921,7 @@ def main():
         )
         st.session_state.selected_edv = selected_edv
         
-        # Apply Master Filter
+        # Apply Master Filter (This filter sets the baseline data scope)
         if selected_edv != 'All Products (Clear Filter)' and 'EDV' in df.columns:
             df_filtered = df[df['EDV'] == selected_edv].copy()
         else:
@@ -845,6 +936,7 @@ def main():
         st.sidebar.subheader("4. Lot Sub-Filter (For Tables 4, 6 & 7)")
         
         lots_in_filtered_data = df_filtered['ASSEMBLY_LOT'].unique().tolist()
+        # Only show affected lots that are present in the *master filtered* data
         available_lots_for_select = sorted(list(set(st.session_state.all_affected_lots_base) & set(lots_in_filtered_data)))
 
         selected_lots = st.sidebar.multiselect(
@@ -888,11 +980,12 @@ def main():
                 st.session_state.all_affected_lots_base, 
                 selected_lots, 
                 affected_quantity_map, 
-                selected_edv
+                selected_edv,
+                affected_lots_edv_df
             )
             
     else:
-        st.title("Welcome to the Process Analysis Tool (v1.4 - Final)")
+        st.title("Welcome to the Process Analysis Tool (v1.5 - Multi-Product UCT)")
         st.info("Please upload your manufacturing data file (.csv or .xlsx) using the control panel on the left to start the analysis.")
 
 
