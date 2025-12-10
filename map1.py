@@ -13,7 +13,9 @@ warnings.filterwarnings('ignore', category=pd.errors.SettingWithCopyWarning)
 CRITICAL_STEPS = {
     '4282': 'TIM-Adhesive Dispensing', '4285': 'LID ATTACH', 
     '4276': 'STIFFENER DISPENSE', '4277': 'STIFFENER ATTACH',
-    '4271': 'AOI (TOP Inspection)', '4269': 'PGA/LGA CHIP CAP REWORK (Top)',
+    '4271': 'AOI (TOP Inspection)', 
+    '4255': 'AOI (Bottom inspection)', # <--- NEW STEP ADDED
+    '4269': 'PGA/LGA CHIP CAP REWORK (Top)',
     '4221': 'AOI RERUN', '4294': 'MPU AUTO FLIP',
     '4404': 'BGA BALL ATTACH', '4414': 'BGA OS', '4415': 'BGA ICOS',
     '4280': 'TIM & ADHESIVE', '4300': 'LID ATTACH (Old)',
@@ -342,9 +344,6 @@ def generate_lot_uct_comparison(df_ct_base, df_ct_affected, baseline_comparison_
     
     return lot_comparison_pivot
 
-# --- NEW: Pareto Calculation Function (REMOVED as per user request) ---
-# --- KEEPING THE STYLING FUNCTIONS ---
-
 # --- Styling Functions ---
 def style_staging_table(df_staging):
     def highlight_violation_row(row):
@@ -475,10 +474,11 @@ def render_upload_page(df, affected_quantity_map, all_affected_lots_base, affect
         
         if all_affected_lots_base:
             
-            # Show the table with the new EDV column
+            # Show the table with the new EDV column (Fixed height for preview)
             st.dataframe(
                 affected_lots_edv_df,
                 use_container_width=True,
+                height=250, # Keep fixed height for sidebar-dependent preview table
                 column_config={
                     "Affected Quantity": st.column_config.NumberColumn(
                         "Affected Quantity",
@@ -516,8 +516,8 @@ def render_staging_page(df_filtered, all_affected_lots_base):
         else:
             st.success("✅ All checked lots passed the staging time requirements.")
         
-        with st.container(height=400):    
-            st.dataframe(style_staging_table(staging_violations_df), use_container_width=True)
+        # FULL EXPANDED TABLE
+        st.dataframe(style_staging_table(staging_violations_df), use_container_width=True)
             
     else:
         st.warning("No data available to calculate staging times for the affected lots at the required steps.")
@@ -538,8 +538,8 @@ def render_traceability_page(df_filtered, all_affected_lots_base):
     st.markdown("The most common tool for a critical step across all affected lots is highlighted in **green**, indicating a potential suspect machine.")
     
     if not traceability_df.empty:
-        with st.container(height=400):
-            st.dataframe(style_traceability_table(traceability_df, common_tools), use_container_width=True)
+        # FULL EXPANDED TABLE
+        st.dataframe(style_traceability_table(traceability_df, common_tools), use_container_width=True)
     else:
         st.warning("No traceability data found for the input lots in the critical steps within the current product filter.")
     
@@ -610,9 +610,9 @@ def render_timeline_page(df_filtered, affected_lots_base, affected_quantity_map,
             st.subheader("Table 4: Detailed Timeline Lot Sequence")
             st.markdown("Affected lots are highlighted in **orange/bold**. Sequence is indicated by the precise **Track Out Timestamp**.")
             
-            with st.container(height=300):
-                timeline_df_styled = style_timeline_table(timeline_data) 
-                st.dataframe(timeline_df_styled, use_container_width=True)
+            # FULL EXPANDED TABLE
+            timeline_df_styled = style_timeline_table(timeline_data) 
+            st.dataframe(timeline_df_styled, use_container_width=True)
             
         else:
             st.warning(f"Could not generate timeline for the selected tool **{selected_machine}**.")
@@ -646,18 +646,20 @@ def render_aggregate_uct_table(comparison_df, edv_lots):
     st.subheader(f"Table 6: Unit Cycle Time (UCT) Comparison (Affected Lots Avg vs. Baseline Avg)")
     if not comparison_df.empty:
         st.markdown(f"Compares Avg **UCT (min/unit)** of the **{len(edv_lots)}** selected lots against the product-specific baseline. **Positive differences (orange)** mean the affected group was slower.")
+        # FULL EXPANDED TABLE
         st.dataframe(style_comparison_table(comparison_df, edv_lots), use_container_width=True)
     else:
         st.warning("Aggregate UCT comparison analysis skipped: No valid comparison data found.")
 
 def render_individual_uct_table(lot_comparison_pivot):
-    st.subheader("Table 7.1: Individual Lot UCT Performance vs. Baseline (Affected Lot)")
+    st.subheader("Table 7.1: Individual Lot UCT Performance vs. Baseline (Current Product)")
     if not lot_comparison_pivot.empty:
         st.markdown(r"Shows the **percentage difference** in UCT for each selected lot compared to the product-specific baseline average. **Positive values (orange)** indicate the specific lot ran slower than the baseline average.")
         # Ensure 'Full Lot ID' is set as index before styling
         styled_df = style_lot_comparison_table(lot_comparison_pivot.set_index('Full Lot ID'))
-        with st.container(height=300):
-            st.dataframe(styled_df, use_container_width=True)
+        
+        # FULL EXPANDED TABLE
+        st.dataframe(styled_df, use_container_width=True)
     else:
         st.info("Individual lot UCT comparison skipped: Insufficient data to compare individual lots against the baseline.")
 
@@ -782,9 +784,8 @@ def render_cycle_time_page(df_filtered, selected_lots, affected_lots_edv_df):
         # Set index for styling
         summary_pivot_df = summary_pivot_df.set_index(['Full Lot ID', 'Product Name (EDV)']).copy()
         
-        with st.container(height=400):
-            # Pass the DataFrame columns starting from the steps (excluding the index)
-            st.dataframe(style_lot_comparison_table(summary_pivot_df), use_container_width=True)
+        # FULL EXPANDED TABLE
+        st.dataframe(style_lot_comparison_table(summary_pivot_df), use_container_width=True)
     else:
         st.info("Consolidated UCT summary table skipped: No valid product-specific UCT data was generated.")
 
