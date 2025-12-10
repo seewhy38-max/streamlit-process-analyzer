@@ -51,6 +51,7 @@ def load_data(uploaded_file):
             file_string = StringIO(uploaded_file.getvalue().decode("utf-8"))
             df = pd.read_csv(file_string, usecols=required_cols)
         elif file_name.endswith('.xlsx') or uploaded_file.type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+            # NOTE: openpyxl must be installed for XLSX support
             df = pd.read_excel(uploaded_file, sheet_name=0, usecols=required_cols)
         else:
             st.error("Unsupported file type. Please upload a CSV or XLSX file.")
@@ -269,7 +270,7 @@ def generate_timeline_data(df, affected_lots_base, step_id, common_machine, affe
     
     return timeline_window, affected_lots_base
 
-# --- Cycle Time Comparison Generation (NOW USES UCT) ---
+# --- Cycle Time Comparison Generation (Uses UCT) ---
 def generate_cycle_time_comparison_table(df_ct, df_affected_ct, selected_lots):
     
     # Calculate Baseline Avg UCT
@@ -318,6 +319,9 @@ def style_traceability_table(df, common_tools):
     return df.style.apply(highlight_common, axis=0)
 
 def style_timeline_table(df_window):
+    """
+    Styles the timeline table, hides Sequence Index, and ensures full Track Out Timestamp is visible.
+    """
     def highlight_affected_full_row(s):
         is_affected = s['Affected Quantity'] > 0 
         style = 'font-weight: bold; background-color: #fce5cd;' if is_affected else ''
@@ -325,8 +329,12 @@ def style_timeline_table(df_window):
         styles = [style if col in cols_to_style else '' for col in s.index]
         return styles
 
-    styled_df = df_window.style.apply(highlight_affected_full_row, axis=1).format({'Track Out Timestamp': lambda t: t.strftime('%Y-%m-%d %H:%M')})
+    # Format the Track Out Timestamp to show full detail for sequencing
+    styled_df = df_window.style.apply(highlight_affected_full_row, axis=1).format(
+        {'Track Out Timestamp': lambda t: t.strftime('%Y-%m-%d %H:%M:%S')}
+    )
     
+    # Columns to hide: Sequence Index, Affected flag, Machine ID, Step ID
     columns_to_hide = ['Sequence Index', 'Affected', 'Machine ID', 'Step ID']
     existing_cols_to_hide = [col for col in columns_to_hide if col in styled_df.columns]
     
@@ -348,7 +356,7 @@ def style_comparison_table(df, selected_lots):
 def get_affected_lot_edv_info(df, affected_lots):
     """Retrieves EDV/Product Name and quantity for each affected lot (with robust KeyError fix)."""
     
-    # 1. IMMEDIATE CHECK for empty data or empty affected list
+    # 1. IMMEDIATE CHECK for empty data or empty affected list (ROBUST FIX)
     if df is None or df.empty or not affected_lots: 
         # Return an empty, but correctly structured, DataFrame immediately
         return pd.DataFrame({
@@ -533,9 +541,9 @@ def render_timeline_page(df_filtered, affected_lots_base, affected_quantity_map,
 
             st.altair_chart(timeline_chart, use_container_width=True) 
 
-            # --- Table 4: Detailed Timeline Table ---
+            # --- Table 4: Detailed Timeline Table (Updated to show TS instead of Index) ---
             st.subheader("Table 4: Detailed Timeline Lot Sequence")
-            st.markdown("Affected lots are highlighted in **orange/bold**.")
+            st.markdown("Affected lots are highlighted in **orange/bold**. Sequence is indicated by the precise **Track Out Timestamp**.")
             
             with st.container(height=300):
                 timeline_df_styled = style_timeline_table(timeline_data) 
@@ -566,7 +574,7 @@ def render_cycle_time_page(df_filtered, affected_lots_base, selected_edv):
             df_affected_ct = df_ct_filtered[df_ct_filtered['ASSEMBLY_LOT'].isin(affected_lots_base)].copy()
             comparison_df = generate_cycle_time_comparison_table(df_ct_filtered, df_affected_ct, affected_lots_base)
 
-    # --- Figure 3: Box Plot (NOW UCT) ---
+    # --- Figure 3: Box Plot (UCT) ---
     st.subheader("Figure 3: Process Unit Cycle Time (UCT) Baseline Distribution (Box Plot)")
     
     if not df_ct_filtered.empty:
@@ -594,7 +602,7 @@ def render_cycle_time_page(df_filtered, affected_lots_base, selected_edv):
 
     st.markdown("---")
 
-    # --- Table 6: Comparison Table (NOW UCT) ---
+    # --- Table 6: Comparison Table (UCT) ---
     st.subheader(f"Table 6: Unit Cycle Time (UCT) Comparison (Affected Lots vs. Baseline)")
     
     if not comparison_df.empty:
@@ -633,7 +641,7 @@ def render_combined_analysis_page(df_filtered, all_affected_lots_base, selected_
 def main():
     st.set_page_config(
         layout="wide", 
-        page_title="Process & Machine Mapping Analyst (UCT Ready)",
+        page_title="Process & Machine Mapping Analyst (v1.3 - Final)",
         initial_sidebar_state="expanded" 
     )
     
@@ -804,7 +812,7 @@ def main():
             )
             
     else:
-        st.title("Welcome to the Process Analysis Tool (v1.3 - UCT Ready)")
+        st.title("Welcome to the Process Analysis Tool (v1.3 - Final)")
         st.info("Please upload your manufacturing data file (.csv or .xlsx) using the control panel on the left to start the analysis.")
 
 
