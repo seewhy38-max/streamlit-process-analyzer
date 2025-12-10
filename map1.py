@@ -43,34 +43,68 @@ def load_data(uploaded_file):
         return None
         
     try:
+        # 1. OPTIMIZATION: Define dtypes upfront to speed up reading and reduce memory
+        optimized_dtypes = {
+            'ASSEMBLY_LOT': 'str', 
+            'SPECNAME': 'str', 
+            'EQUIPMENT_LINE_NAME': 'str', 
+            'OPERATOR': 'str', 
+            'EDV': 'str',
+        }
+        
+        # 2. OPTIMIZATION: Use specialized date parsing
         date_format = '%d/%m/%Y %H:%M:%S'
-        date_parser = lambda x: pd.to_datetime(x, format=date_format, errors='coerce')
+        date_cols = ['TRACK_IN_TS', 'TRACK_OUT_TS']
+
         required_cols = ['ASSEMBLY_LOT', 'SPECNAME', 'TRACK_IN_TS', 'TRACK_OUT_TS', 'EQUIPMENT_LINE_NAME', 'OPERATOR', 'TRACKOUT_QTY', 'EDV']
 
         file_name = uploaded_file.name
         
+        # Define a lambda function for robust date parsing
+        date_parser = lambda x: pd.to_datetime(x, format=date_format, errors='coerce')
+
         if file_name.endswith('.csv') or uploaded_file.type == "text/csv":
             file_string = StringIO(uploaded_file.getvalue().decode("utf-8"))
-            df = pd.read_csv(file_string, usecols=required_cols)
+            df = pd.read_csv(
+                file_string, 
+                usecols=required_cols, 
+                dtype=optimized_dtypes, 
+                parse_dates=date_cols,
+                date_parser=date_parser
+            )
         elif file_name.endswith('.xlsx') or uploaded_file.type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
             # openpyxl must be installed for XLSX support
-            df = pd.read_excel(uploaded_file, sheet_name=0, usecols=required_cols)
+            df = pd.read_excel(
+                uploaded_file, 
+                sheet_name=0, 
+                usecols=required_cols,
+                dtype=optimized_dtypes,
+                parse_dates=date_cols,
+                date_parser=date_parser
+            )
         else:
             st.error("Unsupported file type. Please upload a CSV or XLSX file.")
             return None
 
-        df['SPECNAME'] = df['SPECNAME'].astype(str)
-        df['ASSEMBLY_LOT'] = df['ASSEMBLY_LOT'].astype(str)
-        df['EDV'] = df['EDV'].astype(str).str.strip().replace('nan', 'Unknown', regex=False) # Ensure EDV is cleaned
-        df['TRACK_OUT_TS'] = df['TRACK_OUT_TS'].apply(date_parser)
-        df['TRACK_IN_TS'] = df['TRACK_IN_TS'].apply(date_parser)
+        # 3. OPTIMIZATION: Clean string columns with faster Pandas methods
+        df['EDV'] = df['EDV'].astype(str).str.strip().replace('nan', 'Unknown', regex=False)
         
+        # 4. OPTIMIZATION: Fast numeric conversion for TRACKOUT_QTY
         if 'TRACKOUT_QTY' in df.columns:
+            # Convert to string first, then convert empty strings/nan strings to NaN, then to numeric
             temp_qty = pd.to_numeric(
-                df['TRACKOUT_QTY'].astype(str).str.replace(',', '', regex=False).str.strip('"'),
+                df['TRACKOUT_QTY'].astype(str).replace('', np.nan, regex=False),
                 errors='coerce'
             )
+            
+            # Filter rows where quantity is invalid or <= 0
             df = df[temp_qty > 0].copy()
+            
+            # Add the cleaned numeric column back (Quantity defaults to 1 if NaN after filtering)
+            df['Trackout Quantity'] = temp_qty.fillna(1).astype(int)
+            df.drop(columns=['TRACKOUT_QTY'], errors='ignore', inplace=True)
+        else:
+            df['Trackout Quantity'] = 1 
         
         return df
     except Exception as e:
@@ -81,31 +115,15 @@ def load_data(uploaded_file):
 @st.cache_data(show_spinner=False)
 def calculate_cycle_time(df):
     df_ct = df.copy()
-    date_format = '%d/%m/%Y %H:%M:%S'
-    for col in ['SPECNAME', 'TRACKOUT_QTY']:
-        if col in df_ct.columns:
-            df_ct[col] = df_ct[col].astype(str)
     
-    # Ensure timestamps are datetime objects
-    df_ct['TRACK_IN_TS'] = pd.to_datetime(df_ct['TRACK_IN_TS'], format=date_format, errors='coerce')
-    df_ct['TRACK_OUT_TS'] = pd.to_datetime(df_ct['TRACK_OUT_TS'], format=date_format, errors='coerce')
-    
-    # Clean and parse quantity
-    if 'TRACKOUT_QTY' in df_ct.columns:
-        df_ct['Trackout Quantity'] = pd.to_numeric(
-            df_ct['TRACKOUT_QTY'].str.replace(',', '', regex=False).str.strip('"'), 
-            errors='coerce'
-        ).fillna(1).astype(int)
-    else:
-        df_ct['Trackout Quantity'] = 1 
-        
     # 1. Calculate Lot Cycle Time (Original: Time for the entire batch)
+    # Columns are already datetime objects from load_data
     df_ct['Lot Cycle Time (min)'] = (df_ct['TRACK_OUT_TS'] - df_ct['TRACK_IN_TS']).dt.total_seconds() / 60
     
     # 2. Calculate Unit Cycle Time (NEW! Normalized: Time per Unit)
-    # Use np.where to avoid division by zero and handle cases where quantity is 1
+    # Quantity column is already cleaned and numeric
     df_ct['Unit Cycle Time (min/unit)'] = np.where(
-        df_ct['Trackout Quantity'] > 1, # Only divide if quantity is greater than 1
+        df_ct['Trackout Quantity'] > 1, 
         df_ct['Lot Cycle Time (min)'] / df_ct['Trackout Quantity'],
         df_ct['Lot Cycle Time (min)']
     )
@@ -131,11 +149,7 @@ def calculate_staging_time_violations(df_filtered, all_affected_lots_base):
         (df_filtered['SPECNAME'].isin(steps_to_check))
     ].copy()
 
-    date_format = '%d/%m/%Y %H:%M:%S' 
-    for ts_col in ['TRACK_IN_TS', 'TRACK_OUT_TS']:
-        if not pd.api.types.is_datetime64_any_dtype(df_staging.get(ts_col)):
-            df_staging[ts_col] = pd.to_datetime(df_staging[ts_col], format=date_format, errors='coerce')
-
+    # NOTE: Timestamps should already be datetime objects from load_data
     df_staging.dropna(subset=['TRACK_IN_TS', 'TRACK_OUT_TS'], how='any', inplace=True)
     
     # Pre-pivot: Get the required timestamp (IN or OUT) for each step in each lot
