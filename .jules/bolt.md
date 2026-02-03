@@ -1,0 +1,3 @@
+## 2026-02-03 - Vectorization of Staging Time Calculations
+**Learning:** Manual lot-by-lot loops over DataFrames for multi-step temporal analysis are a major performance bottleneck in this manufacturing data tool. Replacing them with `pivot_table` to aggregate timestamps across steps and then using vectorized operations for time difference calculations and string formatting yielded a ~73x speedup.
+**Action:** Always look for manual iteration over 'Lot IDs' or similar grouping keys in pandas code and replace with `pivot_table`, `groupby`, or other vectorized patterns. Ensure that `columns.name` is reset after pivoting to maintain DataFrame structure consistency.
