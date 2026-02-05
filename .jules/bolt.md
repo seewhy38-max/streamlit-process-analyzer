@@ -1,0 +1,3 @@
+## 2026-02-05 - [Massive speedup by replacing manual loops with pivot_table]
+**Learning:** In this manufacturing data analysis app, `calculate_staging_time_violations` was using a manual lot-by-lot and step-by-step loop with internal filtering, which resulted in $O(N \cdot M)$ complexity. Replacing this with `pd.pivot_table(aggfunc='min')` and vectorized operations yielded a ~150x speedup for 1000 lots (from ~19s to ~0.17s).
+**Action:** Always look for manual iteration over DataFrames (especially with internal filtering) and replace with `pivot_table`, `groupby`, or vectorized operations. Vectorized string operations for report generation also significantly reduce overhead.

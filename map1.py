@@ -179,26 +179,28 @@ def calculate_staging_time_violations(df_filtered, all_affected_lots_base):
     # Pre-pivot: Get the required timestamp (IN or OUT) for each step in each lot
     required_pivot_cols = {}
     for (start_step, end_step), config in STAGING_LIMITS.items():
-        # Using the start step's required timestamp 
         required_pivot_cols[start_step] = config['start_ts']
-        # Using the end step's required timestamp 
         required_pivot_cols[end_step] = config['end_ts']
 
-    staging_pivot_data = []
-    for lot in df_staging['ASSEMBLY_LOT'].unique():
-        lot_data = {'ASSEMBLY_LOT': lot}
-        for step, ts_col in required_pivot_cols.items():
-            # Filter the lot data for the specific step and get the required timestamp (min value)
-            ts = df_staging[
-                (df_staging['ASSEMBLY_LOT'] == lot) & 
-                (df_staging['SPECNAME'] == step)
-            ][ts_col].min()
-            
-            # The column name in the pivot table is the step ID (e.g., '4275')
-            lot_data[step] = ts 
-        staging_pivot_data.append(lot_data)
+    # 1. OPTIMIZATION: Use pivot_table instead of manual lot-by-lot loops
+    # We create two pivots (one for TRACK_IN, one for TRACK_OUT) and select based on required_pivot_cols
+    pivot_in = df_staging.pivot_table(index='ASSEMBLY_LOT', columns='SPECNAME', values='TRACK_IN_TS', aggfunc='min')
+    pivot_out = df_staging.pivot_table(index='ASSEMBLY_LOT', columns='SPECNAME', values='TRACK_OUT_TS', aggfunc='min')
+    pivot_in.columns.name = None # Remove SPECNAME name from columns index
+    pivot_out.columns.name = None
 
-    staging_pivot = pd.DataFrame(staging_pivot_data)
+    staging_pivot = pd.DataFrame(index=df_staging['ASSEMBLY_LOT'].unique())
+    staging_pivot.index.name = 'ASSEMBLY_LOT'
+
+    for step, ts_type in required_pivot_cols.items():
+        if ts_type == 'TRACK_IN_TS':
+            if step in pivot_in.columns:
+                staging_pivot[step] = pivot_in[step]
+        else:
+            if step in pivot_out.columns:
+                staging_pivot[step] = pivot_out[step]
+
+    staging_pivot = staging_pivot.reset_index()
     all_staging_records = []
 
     for (start_step, end_step), config in STAGING_LIMITS.items():
@@ -211,33 +213,44 @@ def calculate_staging_time_violations(df_filtered, all_affected_lots_base):
         end_col = end_step
         
         if start_col in staging_pivot.columns and end_col in staging_pivot.columns:
-            
-            # Calculate time difference using the pre-pivoted TS columns
-            staging_pivot[f'Time Diff ({start_step} to {end_step})'] = (
+            # Vectorized time difference calculation
+            time_diff_col = f'Time Diff ({start_step} to {end_step})'
+            staging_pivot[time_diff_col] = (
                 staging_pivot[end_col] - staging_pivot[start_col]
             ).dt.total_seconds() / 3600
 
             df_check = staging_pivot.dropna(subset=[start_col, end_col]).copy()
-            df_check = df_check[df_check[f'Time Diff ({start_step} to {end_step})'] >= 0]
-            
-            df_check['Violation'] = df_check[f'Time Diff ({start_step} to {end_step})'] > limit_hours
-            
-            for index, row in df_check.iterrows():
-                # Extracting the TS string with the appropriate suffix for display
-                start_ts_str = row[start_col].strftime('%Y-%m-%d %H:%M') + f" ({start_ts_type.replace('TRACK_', '').replace('_TS', '')})"
-                end_ts_str = row[end_col].strftime('%Y-%m-%d %H:%M') + f" ({end_ts_type.replace('TRACK_', '').replace('_TS', '')})"
+            df_check = df_check[df_check[time_diff_col] >= 0]
 
-                all_staging_records.append({
-                    'Lot ID': row['ASSEMBLY_LOT'],
-                    'Staging Check': description,
-                    'Actual Time (hrs)': row[f'Time Diff ({start_step} to {end_step})'],
-                    'Limit (hrs)': limit_hours,
-                    'Start Step TS': start_ts_str,
-                    'End Step TS': end_ts_str,
-                    'Violation': row['Violation']
-                })
+            if df_check.empty:
+                continue
 
-    df_report = pd.DataFrame(all_staging_records)
+            df_check['Violation'] = df_check[time_diff_col] > limit_hours
+            
+            # 2. OPTIMIZATION: Vectorized string formatting for timestamps (Avoid iterrows)
+            start_suffix = f" ({start_ts_type.replace('TRACK_', '').replace('_TS', '')})"
+            end_suffix = f" ({end_ts_type.replace('TRACK_', '').replace('_TS', '')})"
+            
+            df_check['Start Step TS'] = df_check[start_col].dt.strftime('%Y-%m-%d %H:%M') + start_suffix
+            df_check['End Step TS'] = df_check[end_col].dt.strftime('%Y-%m-%d %H:%M') + end_suffix
+
+            # Prepare records for this staging check
+            temp_report = pd.DataFrame({
+                'Lot ID': df_check['ASSEMBLY_LOT'],
+                'Staging Check': description,
+                'Actual Time (hrs)': df_check[time_diff_col],
+                'Limit (hrs)': limit_hours,
+                'Start Step TS': df_check['Start Step TS'],
+                'End Step TS': df_check['End Step TS'],
+                'Violation': df_check['Violation']
+            })
+            all_staging_records.append(temp_report)
+
+    # 3. OPTIMIZATION: Use pd.concat instead of building list of dicts in loop
+    if all_staging_records:
+        df_report = pd.concat(all_staging_records, ignore_index=True)
+    else:
+        df_report = pd.DataFrame()
 
     if not df_report.empty:
         df_report = df_report.sort_values(['Staging Check', 'Actual Time (hrs)'], ascending=[True, False]).reset_index(drop=True)
@@ -484,68 +497,40 @@ def check_shift_handoffs(df_ct_affected, selected_lots, step_id):
     if df_handoff.empty:
         return pd.DataFrame()
 
-    # Map track-out time to the shift it ended in
-    df_handoff['Track Out Shift'] = df_handoff['TRACK_OUT_TS'].apply(map_timestamp_to_shift)
+    # 1. OPTIMIZATION: Vectorized shift mapping (Avoid .apply)
+    ts = df_handoff['TRACK_OUT_TS']
+    m = ts.dt.hour * 60 + ts.dt.minute
+    is_day = (m >= 390) & (m < 1110) # 6:30 to 18:30
     
-    # Define Handoff Windows (e.g., 30 minutes before/after boundary)
+    df_handoff['Track Out Shift'] = np.where(
+        ts.isna(), 'Unknown',
+        np.where(is_day, 'Day Shift (06:30 to 18:30)', 'Night Shift (18:30 to 06:30)')
+    )
     
-    def is_handoff_window(ts):
-        if pd.isna(ts):
-            return False
-        
-        # Shift boundaries are 6:30 AM (6, 30) and 6:30 PM (18, 30)
-        boundaries = [(6, 30), (18, 30)] 
-        
-        candidate_boundaries = []
-        for hour, minute in boundaries:
-            # Boundary on the current day
-            candidate_boundaries.append(ts.replace(hour=hour, minute=minute, second=0, microsecond=0))
-            # Boundary on the next day (e.g., if ts is 6:40 PM, check 6:30 AM tomorrow)
-            candidate_boundaries.append((ts + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0))
-            # Boundary on the previous day (e.g., if ts is 6:20 AM, check 6:30 PM yesterday)
-            candidate_boundaries.append((ts - timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0))
-        
-        min_time_diff = min(abs(ts - ref_ts).total_seconds() / 60 for ref_ts in candidate_boundaries)
-            
-        return min_time_diff <= 30 # Within 30 minutes of 6:30 boundary
+    # 2. OPTIMIZATION: Vectorized handoff window and boundary distance calculation
+    # Distance to 6:30 (390) and 18:30 (1110)
+    d1 = (m - 390).abs()
+    d1 = np.minimum(d1, (m - (390 + 1440)).abs()) # Wrap around
+    d1 = np.minimum(d1, (m - (390 - 1440)).abs())
+    
+    d2 = (m - 1110).abs()
+    d2 = np.minimum(d2, (m - (1110 + 1440)).abs())
+    d2 = np.minimum(d2, (m - (1110 - 1440)).abs())
 
-    df_handoff['Is Handoff Window'] = df_handoff['TRACK_OUT_TS'].apply(is_handoff_window)
-    
+    min_diff = np.minimum(d1, d2)
+
+    df_handoff['Is Handoff Window'] = min_diff <= 30
+    df_handoff['Time to Nearest 6:30 Boundary (min)'] = min_diff
+
     df_handoff = df_handoff[df_handoff['Is Handoff Window']].copy()
     
-    report = df_handoff[['ASSEMBLY_LOT', 'TRACK_OUT_TS', 'Track Out Shift', 'OPERATOR', 'EQUIPMENT_LINE_NAME']].copy()
+    report = df_handoff[['ASSEMBLY_LOT', 'TRACK_OUT_TS', 'Track Out Shift', 'OPERATOR', 'EQUIPMENT_LINE_NAME', 'Time to Nearest 6:30 Boundary (min)']].copy()
     report.rename(columns={
         'ASSEMBLY_LOT': 'Lot ID',
         'TRACK_OUT_TS': 'Track Out Timestamp',
         'OPERATOR': 'Operator ID',
         'EQUIPMENT_LINE_NAME': 'Machine ID'
     }, inplace=True)
-    
-    # Calculate time to nearest 6:30 boundary
-    def calculate_min_time_diff(ts):
-        # Time of day as a timedelta from midnight (0:00)
-        time_of_day = timedelta(hours=ts.hour, minutes=ts.minute, seconds=ts.second)
-        
-        # Boundary times as timedelta from midnight (6:30 AM, 6:30 PM)
-        boundaries_24h = [timedelta(hours=6, minutes=30), timedelta(hours=18, minutes=30)]
-        
-        min_diff_minutes = float('inf')
-        
-        for boundary in boundaries_24h:
-            # Calculate difference on the current day
-            diff_current = abs((time_of_day - boundary).total_seconds() / 60)
-            min_diff_minutes = min(min_diff_minutes, diff_current)
-            
-            # Check for wrapping around midnight (next day's AM boundary, previous day's PM boundary)
-            # 24 * 60 = 1440 minutes in a day
-            diff_next_day = abs((time_of_day - (boundary - timedelta(days=1))).total_seconds() / 60)
-            diff_prev_day = abs((time_of_day - (boundary + timedelta(days=1))).total_seconds() / 60)
-            
-            min_diff_minutes = min(min_diff_minutes, diff_next_day, diff_prev_day)
-            
-        return min_diff_minutes
-
-    report['Time to Nearest 6:30 Boundary (min)'] = report['Track Out Timestamp'].apply(calculate_min_time_diff)
     
     return report.sort_values('Track Out Timestamp')
 
