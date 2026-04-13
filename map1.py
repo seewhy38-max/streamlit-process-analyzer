@@ -7,7 +7,8 @@ from datetime import timedelta
 import warnings
 
 # Suppress warnings for cleaner output
-warnings.filterwarnings('ignore', category=getattr(pd.errors, 'SettingWithCopyWarning', pd.SettingWithCopyWarning))
+# Suppress the SettingWithCopyWarning directly via Pandas options
+pd.options.mode.chained_assignment = None
 
 # --- Global Configuration (Define your critical steps and staging limits here) ---
 CRITICAL_STEPS = {
