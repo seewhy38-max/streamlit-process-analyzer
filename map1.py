@@ -7,7 +7,7 @@ from datetime import timedelta
 import warnings
 
 # Suppress warnings for cleaner output
-warnings.filterwarnings('ignore', category=pd.errors.SettingWithCopyWarning)
+warnings.filterwarnings('ignore', category=pd.SettingWithCopyWarning)
 
 # --- Global Configuration (Define your critical steps and staging limits here) ---
 CRITICAL_STEPS = {
