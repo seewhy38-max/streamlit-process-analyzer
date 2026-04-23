@@ -148,9 +148,14 @@ def calculate_cycle_time(df):
 def calculate_staging_time_violations(df_filtered, all_affected_lots_base):
     # Determine all unique steps involved in staging limits
     steps_to_check = set()
-    for (start, end) in STAGING_LIMITS.keys():
-        steps_to_check.add(start)
-        steps_to_check.add(end)
+    required_pivot_cols = {}
+    for (start_step, end_step), config in STAGING_LIMITS.items():
+        steps_to_check.add(start_step)
+        steps_to_check.add(end_step)
+        # Using the start step's required timestamp
+        required_pivot_cols[start_step] = config['start_ts']
+        # Using the end step's required timestamp
+        required_pivot_cols[end_step] = config['end_ts']
 
     df_staging = df_filtered[
         (df_filtered['ASSEMBLY_LOT'].isin(all_affected_lots_base)) & 
@@ -160,29 +165,29 @@ def calculate_staging_time_violations(df_filtered, all_affected_lots_base):
     # NOTE: Timestamps should already be datetime objects from load_data
     df_staging.dropna(subset=['TRACK_IN_TS', 'TRACK_OUT_TS'], how='any', inplace=True)
     
-    # Pre-pivot: Get the required timestamp (IN or OUT) for each step in each lot
-    required_pivot_cols = {}
-    for (start_step, end_step), config in STAGING_LIMITS.items():
-        # Using the start step's required timestamp 
-        required_pivot_cols[start_step] = config['start_ts']
-        # Using the end step's required timestamp 
-        required_pivot_cols[end_step] = config['end_ts']
+    if df_staging.empty:
+        return pd.DataFrame()
 
-    staging_pivot_data = []
-    for lot in df_staging['ASSEMBLY_LOT'].unique():
-        lot_data = {'ASSEMBLY_LOT': lot}
-        for step, ts_col in required_pivot_cols.items():
-            # Filter the lot data for the specific step and get the required timestamp (min value)
-            ts = df_staging[
-                (df_staging['ASSEMBLY_LOT'] == lot) & 
-                (df_staging['SPECNAME'] == step)
-            ][ts_col].min()
-            
-            # The column name in the pivot table is the step ID (e.g., '4275')
-            lot_data[step] = ts 
-        staging_pivot_data.append(lot_data)
+    # OPTIMIZATION: Replace manual lot/step loops with vectorized pivot_table
+    df_melted_list = []
+    for step, ts_col in required_pivot_cols.items():
+        temp = df_staging[df_staging['SPECNAME'] == step][['ASSEMBLY_LOT', ts_col]].copy()
+        temp.columns = ['ASSEMBLY_LOT', 'TS']
+        temp['SPECNAME'] = step
+        df_melted_list.append(temp)
 
-    staging_pivot = pd.DataFrame(staging_pivot_data)
+    df_melted = pd.concat(df_melted_list)
+
+    staging_pivot = df_melted.pivot_table(
+        index='ASSEMBLY_LOT',
+        columns='SPECNAME',
+        values='TS',
+        aggfunc='min'
+    ).reset_index()
+
+    # Ensure column index name is removed for consistency
+    staging_pivot.columns.name = None
+
     all_staging_records = []
 
     for (start_step, end_step), config in STAGING_LIMITS.items():
@@ -191,37 +196,39 @@ def calculate_staging_time_violations(df_filtered, all_affected_lots_base):
         start_ts_type = config['start_ts']
         end_ts_type = config['end_ts']
         
-        start_col = start_step
-        end_col = end_step
-        
-        if start_col in staging_pivot.columns and end_col in staging_pivot.columns:
+        if start_step in staging_pivot.columns and end_step in staging_pivot.columns:
+            # Create a working copy for this specific limit check
+            df_check = staging_pivot.dropna(subset=[start_step, end_step]).copy()
             
-            # Calculate time difference using the pre-pivoted TS columns
-            staging_pivot[f'Time Diff ({start_step} to {end_step})'] = (
-                staging_pivot[end_col] - staging_pivot[start_col]
+            # Calculate time difference
+            df_check['Actual Time (hrs)'] = (
+                df_check[end_step] - df_check[start_step]
             ).dt.total_seconds() / 3600
-
-            df_check = staging_pivot.dropna(subset=[start_col, end_col]).copy()
-            df_check = df_check[df_check[f'Time Diff ({start_step} to {end_step})'] >= 0]
             
-            df_check['Violation'] = df_check[f'Time Diff ({start_step} to {end_step})'] > limit_hours
+            # Filter for valid differences and determine violations
+            df_check = df_check[df_check['Actual Time (hrs)'] >= 0].copy()
+            df_check['Violation'] = df_check['Actual Time (hrs)'] > limit_hours
             
-            for index, row in df_check.iterrows():
-                # Extracting the TS string with the appropriate suffix for display
-                start_ts_str = row[start_col].strftime('%Y-%m-%d %H:%M') + f" ({start_ts_type.replace('TRACK_', '').replace('_TS', '')})"
-                end_ts_str = row[end_col].strftime('%Y-%m-%d %H:%M') + f" ({end_ts_type.replace('TRACK_', '').replace('_TS', '')})"
+            if not df_check.empty:
+                # OPTIMIZATION: Vectorized creation of report records instead of iterrows()
+                start_ts_suffix = f" ({start_ts_type.replace('TRACK_', '').replace('_TS', '')})"
+                end_ts_suffix = f" ({end_ts_type.replace('TRACK_', '').replace('_TS', '')})"
 
-                all_staging_records.append({
-                    'Lot ID': row['ASSEMBLY_LOT'],
-                    'Staging Check': description,
-                    'Actual Time (hrs)': row[f'Time Diff ({start_step} to {end_step})'],
-                    'Limit (hrs)': limit_hours,
-                    'Start Step TS': start_ts_str,
-                    'End Step TS': end_ts_str,
-                    'Violation': row['Violation']
-                })
+                df_check['Start Step TS'] = df_check[start_step].dt.strftime('%Y-%m-%d %H:%M') + start_ts_suffix
+                df_check['End Step TS'] = df_check[end_step].dt.strftime('%Y-%m-%d %H:%M') + end_ts_suffix
 
-    df_report = pd.DataFrame(all_staging_records)
+                df_check['Staging Check'] = description
+                df_check['Limit (hrs)'] = limit_hours
+                df_check.rename(columns={'ASSEMBLY_LOT': 'Lot ID'}, inplace=True)
+
+                all_staging_records.append(df_check[[
+                    'Lot ID', 'Staging Check', 'Actual Time (hrs)', 'Limit (hrs)', 'Start Step TS', 'End Step TS', 'Violation'
+                ]])
+
+    if not all_staging_records:
+        return pd.DataFrame()
+
+    df_report = pd.concat(all_staging_records)
 
     if not df_report.empty:
         df_report = df_report.sort_values(['Staging Check', 'Actual Time (hrs)'], ascending=[True, False]).reset_index(drop=True)
