@@ -42,70 +42,81 @@ STAGING_LIMITS = {
 def load_data(uploaded_file):
     if uploaded_file is None:
         return None
-
-    required_cols = [
-        'ASSEMBLY_LOT', 'SPECNAME', 'TRACK_IN_TS', 'TRACK_OUT_TS',
-        'EQUIPMENT_LINE_NAME', 'OPERATOR', 'TRACKOUT_QTY', 'EDV'
-    ]
-
+        
     try:
-        name = uploaded_file.name.lower()
-
-        # ✅ CSV handling (UNCHANGED)
-        if name.endswith('.csv') or getattr(uploaded_file, "type", "") == "text/csv":
-            raw = uploaded_file.getvalue().decode('utf-8', errors='replace')
-            df = pd.read_csv(StringIO(raw), dtype=str)
-
-        # ✅ Excel handling (FIXED HERE)
-        else:
-            # ❌ REMOVE date_parser (THIS CAUSED YOUR ERROR)
-            # df = pd.read_excel(uploaded_file, sheet_name=0, dtype=str, date_parser=...)
-
-            # ✅ CORRECT VERSION
-            df = pd.read_excel(uploaded_file, sheet_name=0, dtype=str)
-
-        # -----------------------
-        # Column cleanup
-        # -----------------------
-        df.columns = [c.strip() if isinstance(c, str) else c for c in df.columns]
-
-        missing = [c for c in ['ASSEMBLY_LOT', 'SPECNAME', 'TRACK_IN_TS', 'TRACK_OUT_TS'] if c not in df.columns]
-        if missing:
-            st.error(f"Uploaded file missing required columns: {missing}")
-            return None
-
-        keep = [c for c in required_cols if c in df.columns]
-        extras = [c for c in df.columns if c not in keep]
-        df = df[keep + extras].copy()
-
-        # -----------------------
-        # Datetime parsing (KEEP THIS — CORRECT WAY)
-        # -----------------------
-        df['TRACK_IN_TS'] = parse_datetime_series(df['TRACK_IN_TS'])
-        df['TRACK_OUT_TS'] = parse_datetime_series(df['TRACK_OUT_TS'])
-
-        df['SPECNAME'] = df['SPECNAME'].astype(str).str.strip()
-        df['ASSEMBLY_LOT'] = df['ASSEMBLY_LOT'].astype(str).str.strip()
-
-        # -----------------------
-        # Quantity handling
-        # -----------------------
-        if 'TRACKOUT_QTY' in df.columns:
-            df['TRACKOUT_QTY_NUM'] = (
-                pd.to_numeric(
-                    df['TRACKOUT_QTY'].astype(str).str.replace(',', ''),
-                    errors='coerce'
-                )
-                .fillna(0)
-                .astype(int)
+        # 1. Define dtypes upfront
+        optimized_dtypes = {
+            'ASSEMBLY_LOT': 'str', 
+            'SPECNAME': 'str', 
+            'EQUIPMENT_LINE_NAME': 'str', 
+            'OPERATOR': 'str', 
+            'EDV': 'str',
+        }
+        
+        # 2. Date format configuration
+        date_format = '%d/%m/%Y %H:%M:%S'
+        date_cols = ['TRACK_IN_TS', 'TRACK_OUT_TS']
+        required_cols_base = ['ASSEMBLY_LOT', 'SPECNAME', 'TRACK_IN_TS', 'TRACK_OUT_TS', 'EQUIPMENT_LINE_NAME', 'OPERATOR', 'TRACKOUT_QTY', 'EDV']
+        
+        file_name = uploaded_file.name
+        
+        # --- Initial Data Load (Removed date_parser to fix the error) ---
+        if file_name.endswith('.csv') or uploaded_file.type == "text/csv":
+            file_string = StringIO(uploaded_file.getvalue().decode("utf-8"))
+            df = pd.read_csv(
+                file_string, 
+                dtype=optimized_dtypes
+            )
+        elif file_name.endswith('.xlsx') or uploaded_file.type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+            df = pd.read_excel(
+                uploaded_file, 
+                sheet_name=0, 
+                dtype=optimized_dtypes
             )
         else:
-            df['TRACKOUT_QTY_NUM'] = 1
+            st.error("Unsupported file type. Please upload a CSV or XLSX file.")
+            return None
 
+        # --- NEW: Explicit Date Parsing (Modern Standard) ---
+        for col in date_cols:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], format=date_format, errors='coerce', dayfirst=True)
+
+        # --- 3. Robust VENDORNAME Column Check ---
+        vendor_col_found = False
+        possible_vendor_names = ['VENDORNAME', 'Vendorname', 'vendorname', 'Vendor_Name']
+        for col in df.columns:
+            if col in possible_vendor_names:
+                df.rename(columns={col: 'VENDORNAME'}, inplace=True)
+                vendor_col_found = True
+                break
+        if not vendor_col_found:
+            df['VENDORNAME'] = 'Unknown (Column Missing)'
+        
+        # --- 4. Ensure all base required columns are present ---
+        missing_base_cols = [col for col in required_cols_base if col not in df.columns]
+        if missing_base_cols:
+             raise ValueError(f"Required base columns not found: {missing_base_cols}")
+
+        # --- 5. Final Cleaning ---
+        df = df[required_cols_base + ['VENDORNAME']].copy() 
+        df['EDV'] = df['EDV'].astype(str).str.strip().replace('nan', 'Unknown', regex=False)
+        df['VENDORNAME'] = df['VENDORNAME'].astype(str).str.strip().replace('nan', 'Unknown', regex=False) 
+        
+        # 6. Fast numeric conversion for TRACKOUT_QTY
+        if 'TRACKOUT_QTY' in df.columns:
+            # Handle potential string formatting in quantities
+            cleaned_qty = df['TRACKOUT_QTY'].astype(str).str.replace(',', '').replace('', np.nan)
+            temp_qty = pd.to_numeric(cleaned_qty, errors='coerce')
+            df = df[temp_qty > 0].copy()
+            df['Trackout Quantity'] = temp_qty.fillna(1).astype(int)
+            df.drop(columns=['TRACKOUT_QTY'], errors='ignore', inplace=True)
+        else:
+            df['Trackout Quantity'] = 1 
+        
         return df
-
     except Exception as e:
-        st.error(f"Error loading file: {e}")
+        st.error(f"Error loading or parsing file: {e}")
         return None
 
 # --- Cycle Time Calculation (NOW INCLUDES UCT) ---
