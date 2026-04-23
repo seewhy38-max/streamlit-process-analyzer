@@ -168,21 +168,24 @@ def calculate_staging_time_violations(df_filtered, all_affected_lots_base):
         # Using the end step's required timestamp 
         required_pivot_cols[end_step] = config['end_ts']
 
-    staging_pivot_data = []
-    for lot in df_staging['ASSEMBLY_LOT'].unique():
-        lot_data = {'ASSEMBLY_LOT': lot}
-        for step, ts_col in required_pivot_cols.items():
-            # Filter the lot data for the specific step and get the required timestamp (min value)
-            ts = df_staging[
-                (df_staging['ASSEMBLY_LOT'] == lot) & 
-                (df_staging['SPECNAME'] == step)
-            ][ts_col].min()
-            
-            # The column name in the pivot table is the step ID (e.g., '4275')
-            lot_data[step] = ts 
-        staging_pivot_data.append(lot_data)
+    # ⚡ BOLT OPTIMIZATION: Use pivot_table instead of manual lot-by-lot iteration
+    # First, map the required timestamp column to each SPECNAME
+    ts_choice = df_staging['SPECNAME'].map(required_pivot_cols)
+    # Vectorized extraction of the relevant timestamp
+    df_staging['RELEVANT_TS'] = pd.to_datetime(np.where(
+        ts_choice == 'TRACK_IN_TS',
+        df_staging['TRACK_IN_TS'],
+        df_staging['TRACK_OUT_TS']
+    ))
 
-    staging_pivot = pd.DataFrame(staging_pivot_data)
+    # Fast pivot to get one row per lot and steps as columns
+    staging_pivot = df_staging.pivot_table(
+        index='ASSEMBLY_LOT',
+        columns='SPECNAME',
+        values='RELEVANT_TS',
+        aggfunc='min'
+    ).reset_index()
+
     all_staging_records = []
 
     for (start_step, end_step), config in STAGING_LIMITS.items():
@@ -195,7 +198,6 @@ def calculate_staging_time_violations(df_filtered, all_affected_lots_base):
         end_col = end_step
         
         if start_col in staging_pivot.columns and end_col in staging_pivot.columns:
-            
             # Calculate time difference using the pre-pivoted TS columns
             staging_pivot[f'Time Diff ({start_step} to {end_step})'] = (
                 staging_pivot[end_col] - staging_pivot[start_col]
@@ -206,20 +208,22 @@ def calculate_staging_time_violations(df_filtered, all_affected_lots_base):
             
             df_check['Violation'] = df_check[f'Time Diff ({start_step} to {end_step})'] > limit_hours
             
-            for index, row in df_check.iterrows():
-                # Extracting the TS string with the appropriate suffix for display
-                start_ts_str = row[start_col].strftime('%Y-%m-%d %H:%M') + f" ({start_ts_type.replace('TRACK_', '').replace('_TS', '')})"
-                end_ts_str = row[end_col].strftime('%Y-%m-%d %H:%M') + f" ({end_ts_type.replace('TRACK_', '').replace('_TS', '')})"
+            # ⚡ BOLT OPTIMIZATION: Vectorized report formatting and generation instead of iterrows()
+            if not df_check.empty:
+                # Vectorized date formatting
+                df_check['Start Step TS'] = df_check[start_col].dt.strftime('%Y-%m-%d %H:%M') + f" ({start_ts_type.replace('TRACK_', '').replace('_TS', '')})"
+                df_check['End Step TS'] = df_check[end_col].dt.strftime('%Y-%m-%d %H:%M') + f" ({end_ts_type.replace('TRACK_', '').replace('_TS', '')})"
 
-                all_staging_records.append({
-                    'Lot ID': row['ASSEMBLY_LOT'],
-                    'Staging Check': description,
-                    'Actual Time (hrs)': row[f'Time Diff ({start_step} to {end_step})'],
-                    'Limit (hrs)': limit_hours,
-                    'Start Step TS': start_ts_str,
-                    'End Step TS': end_ts_str,
-                    'Violation': row['Violation']
-                })
+                # Prepare columns for output
+                df_check['Lot ID'] = df_check['ASSEMBLY_LOT']
+                df_check['Staging Check'] = description
+                df_check['Actual Time (hrs)'] = df_check[f'Time Diff ({start_step} to {end_step})']
+                df_check['Limit (hrs)'] = limit_hours
+
+                # Extend the report list efficiently
+                all_staging_records.extend(
+                    df_check[['Lot ID', 'Staging Check', 'Actual Time (hrs)', 'Limit (hrs)', 'Start Step TS', 'End Step TS', 'Violation']].to_dict('records')
+                )
 
     df_report = pd.DataFrame(all_staging_records)
 
