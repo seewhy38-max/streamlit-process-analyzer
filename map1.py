@@ -1055,12 +1055,12 @@ def compute_root_cause_engine(df_filtered, analysis_lots, affected_quantity_map,
 def _bar_html(label, score, color, sublabel=""):
     """Renders a single horizontal score bar as HTML."""
     score = max(0.0, min(100.0, float(score)))
-    sub = f"<span style='color:var(--muted);font-size:0.8em;'> &nbsp;{sublabel}</span>" if sublabel else ""
+    sub = f"<span style='color:#888;font-size:0.8em;'> &nbsp;{sublabel}</span>" if sublabel else ""
     return (
         f"<div style='margin:6px 0;'>"
         f"<div style='display:flex;justify-content:space-between;font-size:0.9em;margin-bottom:2px;'>"
         f"<span><b>{label}</b>{sub}</span><span style='font-weight:700;color:{color};'>{score:.0f}%</span></div>"
-        f"<div style='background:var(--track);border-radius:6px;height:16px;width:100%;overflow:hidden;'>"
+        f"<div style='background:#eceff1;border-radius:6px;height:16px;width:100%;overflow:hidden;'>"
         f"<div style='background:{color};height:100%;width:{score:.0f}%;border-radius:6px;'></div></div>"
         f"</div>"
     )
@@ -1852,99 +1852,6 @@ def render_combined_analysis_page(df_filtered, all_affected_lots_base, selected_
         render_vendor_analysis_page(df_filtered, all_affected_lots_base)
     
 # ======================================================================
-# THEME ENGINE (v2.1 - light/dark minimal)
-# ======================================================================
-
-_THEME_LIGHT = """
-  --bg:#f6f7f9; --surface:#ffffff; --surface-2:#f0f2f5;
-  --border:#e4e7eb; --text:#1c2330; --muted:#697586;
-  --accent:#2563eb; --accent-soft:#eaf1ff; --track:#eceff1;
-  --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.05);
-"""
-
-_THEME_DARK = """
-  --bg:#0e131b; --surface:#171e29; --surface-2:#1d2530;
-  --border:#2a3340; --text:#e6e9ef; --muted:#9aa6b6;
-  --accent:#5b8def; --accent-soft:#1b2840; --track:#252e3b;
-  --shadow:0 1px 2px rgba(0,0,0,.35);
-"""
-
-_STATIC_CSS = """
-  html, body, [class*="css"]  { font-family: 'Inter','Segoe UI',system-ui,-apple-system,sans-serif; }
-
-  [data-testid="stAppViewContainer"], .stApp { background: var(--bg); color: var(--text); }
-  [data-testid="stHeader"] { background: transparent; }
-  [data-testid="stAppViewContainer"] .block-container { padding-top: 2.2rem; max-width: 1400px; }
-
-  /* Sidebar */
-  [data-testid="stSidebar"] { background: var(--surface); border-right: 1px solid var(--border); }
-  [data-testid="stSidebar"] * { color: var(--text); }
-
-  /* Headings + text */
-  h1, h2, h3, h4 { color: var(--text); letter-spacing:-.01em; font-weight: 700; }
-  h1 { font-size: 1.85rem; }
-  h2 { font-size: 1.35rem; }
-  h3 { font-size: 1.12rem; }
-  p, span, label, li, .stMarkdown { color: var(--text); }
-  hr { border-color: var(--border) !important; }
-  a { color: var(--accent); }
-
-  /* Metric -> card */
-  [data-testid="stMetric"] {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow);
-  }
-  [data-testid="stMetricLabel"] p { color: var(--muted) !important; font-size:.78rem !important;
-    text-transform: uppercase; letter-spacing:.04em; font-weight:600; }
-  [data-testid="stMetricValue"] { color: var(--text); font-weight: 700; }
-  [data-testid="stMetricDelta"] { color: var(--muted) !important; }
-
-  /* Tabs */
-  .stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 1px solid var(--border); }
-  .stTabs [data-baseweb="tab"] {
-    background: transparent; border-radius: 8px 8px 0 0; padding: 8px 16px;
-    color: var(--muted); font-weight: 600;
-  }
-  .stTabs [aria-selected="true"] { background: var(--accent-soft); color: var(--accent) !important; }
-
-  /* Expander */
-  [data-testid="stExpander"] { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
-  [data-testid="stExpander"] summary { font-weight: 600; }
-
-  /* Inputs */
-  [data-baseweb="select"] > div, .stTextInput input, .stNumberInput input {
-    border-radius: 8px !important; border-color: var(--border) !important;
-  }
-
-  /* Dataframe container */
-  [data-testid="stDataFrame"] { border: 1px solid var(--border); border-radius: 10px; }
-
-  /* Buttons / radio polish */
-  .stRadio [role="radiogroup"] label { padding: 2px 0; }
-  div.stButton > button {
-    border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text);
-  }
-  div.stButton > button:hover { border-color: var(--accent); color: var(--accent); }
-
-  /* Alerts soften */
-  [data-testid="stAlert"] { border-radius: 10px; }
-
-  /* Section card helper (used by dashboard) */
-  .rc-card { background: var(--surface); border:1px solid var(--border);
-    border-radius:12px; padding:16px 18px; box-shadow: var(--shadow); }
-"""
-
-
-def inject_theme(dark: bool):
-    """Inject the global stylesheet with the chosen palette."""
-    vars_block = _THEME_DARK if dark else _THEME_LIGHT
-    st.markdown(
-        "<style>\n:root{" + vars_block + "}\n" + _STATIC_CSS + "\n</style>",
-        unsafe_allow_html=True,
-    )
-
-
-# ======================================================================
 # MAIN APP EXECUTION AND NAVIGATION
 # ======================================================================
 
@@ -1952,22 +1859,11 @@ def main():
     # UPDATED: Version includes Vendor Analysis (v1.9) and 12-Hour Shift Logic, plus Timeline Fix
     st.set_page_config(
         layout="wide", 
-        page_title="Process & Machine Mapping Analyst (v2.1 - UI refresh + Root Cause Ranking)",
+        page_title="Process & Machine Mapping Analyst (v2.1 - Tabbed report + Root Cause Ranking)",
         initial_sidebar_state="expanded" 
     )
 
-    # --- Theme state + toggle (top of sidebar, always visible) ---
-    if 'dark_mode' not in st.session_state:
-        st.session_state.dark_mode = False
-
-    top_l, top_r = st.sidebar.columns([1, 1])
-    top_l.markdown("### 🛠️ Control Panel")
-    st.session_state.dark_mode = top_r.toggle(
-        "🌙 Dark", value=st.session_state.dark_mode,
-        help="Switch between light and dark mode.",
-    )
-    inject_theme(st.session_state.dark_mode)
-    st.sidebar.markdown("---")
+    st.sidebar.title("🛠️ Analysis Control Panel")
     
     # Initialize Session State
     if 'uploaded_file' not in st.session_state:
